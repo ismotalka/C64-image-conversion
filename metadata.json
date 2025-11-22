@@ -1,0 +1,5 @@
+{
+  "name": "RetroVision Converter",
+  "description": "Convert modern images into authentic retro computing formats (C64, Amiga, EGA, VGA) using advanced dithering and palette quantization algorithms.",
+  "requestFramePermissions": []
+}
