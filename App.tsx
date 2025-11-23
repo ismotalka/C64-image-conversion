@@ -1,8 +1,10 @@
+
 import React, { useState, useRef, useEffect } from 'react';
 import { PALETTES, Palette } from './utils/palettes';
 import { processImage } from './utils/imageProcessor';
 import { analyzeRetroImage } from './services/geminiService';
-import { Upload, Monitor, Cpu, Save, Wand2, Terminal } from 'lucide-react';
+import { recordLoadingVideo } from './utils/videoGenerator';
+import { Upload, Monitor, Cpu, Save, Wand2, Terminal, Play, Video, Clock, Grid } from 'lucide-react';
 
 const App: React.FC = () => {
   const [originalImage, setOriginalImage] = useState<string | null>(null);
@@ -13,9 +15,15 @@ const App: React.FC = () => {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [dithering, setDithering] = useState(1.0);
   const [resolutionScale, setResolutionScale] = useState(1.0);
-
+  
+  // Animation states
+  const [isAnimating, setIsAnimating] = useState(false);
+  const [loadingSpeed, setLoadingSpeed] = useState<number>(6); // Seconds
+  const [blockSize, setBlockSize] = useState<number>(8); // Pixels
+  const [isGeneratingVideo, setIsGeneratingVideo] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const animationReqRef = useRef<number>();
 
   const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -26,6 +34,7 @@ const App: React.FC = () => {
           setOriginalImage(e.target.result as string);
           setProcessedImage(null);
           setGeminiAnalysis("");
+          stopAnimation();
         }
       };
       reader.readAsDataURL(file);
@@ -35,15 +44,14 @@ const App: React.FC = () => {
   const triggerConversion = async () => {
     if (!originalImage) return;
     setIsProcessing(true);
+    stopAnimation();
     
-    // Load image into an offscreen image element to get dimensions
     const img = new Image();
     img.src = originalImage;
     await new Promise((resolve) => { img.onload = resolve; });
 
     const palette = PALETTES[selectedSystem];
     
-    // Create a temporary canvas for resizing logic
     const tempCanvas = document.createElement('canvas');
     const ctx = tempCanvas.getContext('2d');
     
@@ -52,9 +60,6 @@ const App: React.FC = () => {
         return;
     }
 
-    // Calculate Target Dimensions maintaining aspect ratio
-    // We restrict the width based on the retro system's typical width (e.g. 320px)
-    // multiplied by user preference scale
     const targetWidth = Math.floor((palette.maxWidth || 320) * resolutionScale);
     const aspectRatio = img.height / img.width;
     const targetHeight = Math.floor(targetWidth * aspectRatio);
@@ -62,10 +67,8 @@ const App: React.FC = () => {
     tempCanvas.width = targetWidth;
     tempCanvas.height = targetHeight;
 
-    // Draw and resize (naive sampling, browser default)
     ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
 
-    // Process pixel-by-pixel
     const resultDataUrl = await processImage(tempCanvas, palette, dithering);
     setProcessedImage(resultDataUrl);
     setIsProcessing(false);
@@ -87,6 +90,100 @@ const App: React.FC = () => {
     link.download = `retro-${selectedSystem}-${Date.now()}.png`;
     link.click();
   };
+
+  // Animation Logic
+  const stopAnimation = () => {
+      if (animationReqRef.current) cancelAnimationFrame(animationReqRef.current);
+      setIsAnimating(false);
+  };
+
+  const startAnimation = () => {
+      if (!processedImage || !canvasRef.current) return;
+      
+      const img = new Image();
+      img.src = processedImage;
+      img.onload = () => {
+          setIsAnimating(true);
+          const canvas = canvasRef.current!;
+          const ctx = canvas.getContext('2d')!;
+          
+          canvas.width = img.width;
+          canvas.height = img.height;
+          
+          // Prepare Source Data
+          const sourceCanvas = document.createElement('canvas');
+          sourceCanvas.width = img.width;
+          sourceCanvas.height = img.height;
+          const sourceCtx = sourceCanvas.getContext('2d')!;
+          sourceCtx.drawImage(img, 0, 0);
+          
+          // Initialize Display (Black Background)
+          ctx.fillStyle = "#000000";
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          
+          // Animation Configuration for Variable Block Loading
+          const BLOCK_SIZE = blockSize;
+          const blocksX = Math.ceil(img.width / BLOCK_SIZE);
+          const blocksY = Math.ceil(img.height / BLOCK_SIZE);
+          const totalBlocks = blocksX * blocksY;
+          
+          const durationMs = loadingSpeed * 1000;
+          const startTime = performance.now();
+          let renderedBlocks = 0;
+          
+          const animate = () => {
+              const now = performance.now();
+              const elapsed = now - startTime;
+              const progress = Math.min(1, elapsed / durationMs);
+              
+              // Calculate total blocks that should be visible by now
+              const targetBlocks = Math.floor(totalBlocks * progress);
+              
+              // Draw new blocks since last frame
+              for (let i = renderedBlocks; i < targetBlocks; i++) {
+                  const bx = i % blocksX;
+                  const by = Math.floor(i / blocksX);
+                  
+                  const x = bx * BLOCK_SIZE;
+                  const y = by * BLOCK_SIZE;
+                  const w = Math.min(BLOCK_SIZE, img.width - x);
+                  const h = Math.min(BLOCK_SIZE, img.height - y);
+                  
+                  // Copy block from source to display
+                  ctx.drawImage(sourceCanvas, x, y, w, h, x, y, w, h);
+              }
+              
+              renderedBlocks = targetBlocks;
+              
+              if (progress < 1) {
+                  animationReqRef.current = requestAnimationFrame(animate);
+              } else {
+                  setIsAnimating(false);
+              }
+          };
+          animate();
+      };
+  };
+
+  const handleVideoExport = async () => {
+      if (!processedImage) return;
+      setIsGeneratingVideo(true);
+      try {
+          const videoUrl = await recordLoadingVideo(processedImage, loadingSpeed * 1000, blockSize);
+          const link = document.createElement('a');
+          link.href = videoUrl;
+          link.download = `retro-load-${selectedSystem}-${loadingSpeed}s.webm`;
+          link.click();
+      } catch (e) {
+          console.error("Video generation failed", e);
+          alert("Could not generate video. Browser may not support MediaRecorder.");
+      }
+      setIsGeneratingVideo(false);
+  };
+
+  useEffect(() => {
+      return () => stopAnimation();
+  }, []);
 
   return (
     <div className="min-h-screen flex flex-col items-center py-10 px-4 relative overflow-hidden">
@@ -134,11 +231,11 @@ const App: React.FC = () => {
                 <label className="text-xs font-bold text-gray-500 uppercase tracking-wider flex items-center gap-2">
                    <Monitor size={14} /> Target System
                 </label>
-                <div className="grid grid-cols-1 gap-2">
+                <div className="grid grid-cols-1 gap-2 max-h-60 overflow-y-auto pr-1 custom-scrollbar">
                   {Object.keys(PALETTES).map((key) => (
                     <button
                       key={key}
-                      onClick={() => setSelectedSystem(key)}
+                      onClick={() => { setSelectedSystem(key); setProcessedImage(null); stopAnimation(); }}
                       className={`px-4 py-3 text-left font-mono text-sm border rounded transition-all duration-200 ${
                         selectedSystem === key 
                         ? 'border-green-500 bg-green-900/20 text-green-400 shadow-[0_0_10px_rgba(74,222,128,0.1)]' 
@@ -234,12 +331,20 @@ const App: React.FC = () => {
                  </div>
              )}
 
+             {/* Animation Canvas Layer */}
+             <canvas 
+                ref={canvasRef}
+                className={`max-w-full max-h-[600px] object-contain absolute z-10 pointer-events-none ${isAnimating ? 'block' : 'hidden'}`}
+                style={{imageRendering: 'pixelated'}}
+             />
+
+             {/* Static Processed Image Layer */}
              {processedImage && (
                  <img 
                     src={processedImage} 
                     alt="Processed" 
-                    className="max-w-full max-h-[600px] object-contain image-pixelated relative z-0" 
-                    style={{imageRendering: 'pixelated'}} // Critical for retro look
+                    className={`max-w-full max-h-[600px] object-contain relative z-0 ${isAnimating ? 'opacity-0' : 'opacity-100'}`} 
+                    style={{imageRendering: 'pixelated'}} 
                  />
              )}
           </div>
@@ -275,17 +380,81 @@ const App: React.FC = () => {
                </div>
 
                {/* Actions */}
-               <div className="flex flex-col justify-center gap-3">
+               <div className="flex flex-col justify-center gap-4 p-4 bg-neutral-900 border border-neutral-800 rounded-lg">
+                   
+                   {/* Animation Controls Group */}
+                   <div className="grid grid-cols-2 gap-4">
+                       {/* Speed Control */}
+                       <div>
+                            <div className="flex justify-between mb-1 items-center">
+                                <label className="text-[10px] font-bold text-gray-500 uppercase flex items-center gap-1">
+                                    <Clock size={10}/> Speed
+                                </label>
+                                <span className="text-[10px] text-green-400 font-mono">{loadingSpeed}s</span>
+                            </div>
+                            <input 
+                                type="range" 
+                                min="1" 
+                                max="30" 
+                                step="1" 
+                                value={loadingSpeed} 
+                                onChange={(e) => setLoadingSpeed(parseInt(e.target.value))}
+                                className="w-full h-1.5 bg-neutral-800 rounded-lg appearance-none cursor-pointer accent-green-500 border border-neutral-700"
+                            />
+                       </div>
+
+                       {/* Block Size Control */}
+                       <div>
+                            <div className="flex justify-between mb-1 items-center">
+                                <label className="text-[10px] font-bold text-gray-500 uppercase flex items-center gap-1">
+                                    <Grid size={10}/> Block
+                                </label>
+                                <span className="text-[10px] text-green-400 font-mono">{blockSize}px</span>
+                            </div>
+                            <input 
+                                type="range" 
+                                min="4" 
+                                max="64" 
+                                step="4" 
+                                value={blockSize} 
+                                onChange={(e) => setBlockSize(parseInt(e.target.value))}
+                                className="w-full h-1.5 bg-neutral-800 rounded-lg appearance-none cursor-pointer accent-green-500 border border-neutral-700"
+                            />
+                       </div>
+                   </div>
+
+                   <div className="grid grid-cols-2 gap-3">
+                       <button 
+                            onClick={startAnimation}
+                            disabled={isAnimating}
+                            className="py-3 bg-neutral-800 hover:bg-neutral-700 text-white font-mono border border-neutral-600 rounded flex items-center justify-center gap-2 transition-all disabled:opacity-50"
+                        >
+                            <Play size={18} />
+                            <span>VISUALIZE LOAD</span>
+                        </button>
+
+                        <button 
+                            onClick={handleVideoExport}
+                            disabled={isGeneratingVideo}
+                            className="py-3 bg-neutral-800 hover:bg-neutral-700 text-white font-mono border border-neutral-600 rounded flex items-center justify-center gap-2 transition-all disabled:opacity-50"
+                        >
+                            <Video size={18} />
+                            <span>{isGeneratingVideo ? 'RECORDING...' : 'SAVE VIDEO'}</span>
+                        </button>
+                   </div>
+                   
                    <button 
                      onClick={downloadImage}
-                     className="w-full py-4 bg-neutral-800 hover:bg-neutral-700 text-white font-mono border border-neutral-600 rounded flex items-center justify-center gap-3 transition-all"
+                     className="w-full py-3 bg-green-900/20 hover:bg-green-900/40 text-green-400 border border-green-800 rounded flex items-center justify-center gap-3 transition-all font-mono font-bold"
                    >
                       <Save size={20} />
-                      <span>SAVE TO DISK</span>
+                      <span>SAVE IMAGE TO DISK</span>
                    </button>
                    
-                   <div className="text-center">
-                       <p className="text-xs text-gray-600 font-mono">Format: PNG • {PALETTES[selectedSystem].colors.length} Colors • Dithering: {(dithering*100).toFixed(0)}%</p>
+                   <div className="text-center mt-1">
+                       <p className="text-xs text-gray-600 font-mono">
+                           System: {PALETTES[selectedSystem].name} • Dither: {(dithering*100).toFixed(0)}%
+                       </p>
                    </div>
                </div>
 
@@ -300,6 +469,13 @@ const App: React.FC = () => {
             0% { width: 0% }
             50% { width: 70% }
             100% { width: 100% }
+        }
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 6px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: #333; 
+            border-radius: 3px;
         }
       `}</style>
     </div>
